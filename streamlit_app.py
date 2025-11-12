@@ -25,101 +25,170 @@ Analyze the probability of intraday highs and lows holding until end of trading 
 Filter by specific time ranges to see when your highs and lows were established.
 """)
 
-# File uploader
-st.sidebar.header("📁 Data Input")
-uploaded_file = st.sidebar.file_uploader(
-    "Upload detailed breakdown CSV",
-    type=['csv'],
-    help="Upload the candle_data_detailed_breakdown.csv file"
-)
+# Try to load from default location first
+import os
 
-if uploaded_file is not None:
-    # Load data
-    @st.cache_data
-    def load_data(file):
-        df = pd.read_csv(file)
-        df['date'] = pd.to_datetime(df['date'])
-        df['high_time'] = pd.to_datetime(df['high_time'], format='%H:%M').dt.time
-        df['low_time'] = pd.to_datetime(df['low_time'], format='%H:%M').dt.time
-        df['observation_time'] = pd.to_datetime(df['observation_time'], format='%H:%M').dt.time
+# Default file path - looks for the file in the same directory as the script
+default_file_path = os.path.join(os.path.dirname(__file__), 'candle_data_detailed_breakdown.csv')
+
+# Initialize df as None
+df = None
+
+# Load data function definition
+@st.cache_data
+def load_data(file_or_path):
+    if isinstance(file_or_path, str):
+        df = pd.read_csv(file_or_path)
+    else:
+        df = pd.read_csv(file_or_path)
+    df['date'] = pd.to_datetime(df['date'])
+    df['high_time'] = pd.to_datetime(df['high_time'], format='%H:%M').dt.time
+    df['low_time'] = pd.to_datetime(df['low_time'], format='%H:%M').dt.time
+    df['observation_time'] = pd.to_datetime(df['observation_time'], format='%H:%M').dt.time
+    
+    # Handle break times (may be None/NaN)
+    if 'high_break_time' in df.columns:
+        df['high_break_time'] = pd.to_datetime(df['high_break_time'], format='%H:%M', errors='coerce').dt.time
+    if 'low_break_time' in df.columns:
+        df['low_break_time'] = pd.to_datetime(df['low_break_time'], format='%H:%M', errors='coerce').dt.time
+    
+    return df
+
+# Check if default file exists and load it
+if os.path.exists(default_file_path):
+    df = load_data(default_file_path)
+    default_file_loaded = True
+else:
+    default_file_loaded = False
+
+# Sidebar filters header
+st.sidebar.header("🔍 Filters")
+
+# Time helper functions
+def time_to_minutes(t):
+    """Convert time object to minutes since midnight"""
+    return t.hour * 60 + t.minute
+
+def minutes_to_time(minutes):
+    """Convert minutes since midnight to time object"""
+    return time(minutes // 60, minutes % 60)
+
+# Generate 5-minute intervals from 4:00 to 15:55
+def generate_5min_intervals():
+    """Generate list of times in 5-minute intervals from 4:00 to 15:55"""
+    intervals = []
+    start_minutes = 4 * 60  # 4:00 in minutes
+    end_minutes = 15 * 60 + 55  # 15:55 in minutes
+    
+    for minutes in range(start_minutes, end_minutes + 1, 5):
+        hours = minutes // 60
+        mins = minutes % 60
+        intervals.append(time(hours, mins))
+    
+    return intervals
+
+time_intervals = generate_5min_intervals()
+time_interval_strings = [t.strftime('%H:%M') for t in time_intervals]
+
+if df is not None:
+    
+    # Quick Time Window Filter
+    st.sidebar.subheader("⚡ Quick Time Window (±30 min)")
+    use_quick_filter = st.sidebar.checkbox(
+        "Enable Quick Filter",
+        value=False,
+        help="Automatically set High and Low ranges to ±30 minutes around center times"
+    )
+    
+    if use_quick_filter:
+        col1, col2 = st.sidebar.columns(2)
         
-        # Handle break times (may be None/NaN)
-        if 'high_break_time' in df.columns:
-            df['high_break_time'] = pd.to_datetime(df['high_break_time'], format='%H:%M', errors='coerce').dt.time
-        if 'low_break_time' in df.columns:
-            df['low_break_time'] = pd.to_datetime(df['low_break_time'], format='%H:%M', errors='coerce').dt.time
+        with col1:
+            high_center_time_str = st.sidebar.selectbox(
+                "High Center",
+                options=time_interval_strings,
+                index=time_interval_strings.index('07:10') if '07:10' in time_interval_strings else 36,
+                help="High range will be ±30 min around this time"
+            )
         
-        return df
-    
-    df = load_data(uploaded_file)
-    
-    st.sidebar.success(f"✅ Loaded {len(df)} records")
-    st.sidebar.info(f"📅 Date range: {df['date'].min().date()} to {df['date'].max().date()}")
-    
-    # Sidebar filters
-    st.sidebar.header("🔍 Filters")
-    
-    # Time helper function
-    def time_to_minutes(t):
-        """Convert time object to minutes since midnight"""
-        return t.hour * 60 + t.minute
-    
-    def minutes_to_time(minutes):
-        """Convert minutes since midnight to time object"""
-        return time(minutes // 60, minutes % 60)
-    
-    # Generate 5-minute intervals from 4:00 to 15:55
-    def generate_5min_intervals():
-        """Generate list of times in 5-minute intervals from 4:00 to 15:55"""
-        intervals = []
-        start_minutes = 4 * 60  # 4:00 in minutes
-        end_minutes = 15 * 60 + 55  # 15:55 in minutes
+        with col2:
+            low_center_time_str = st.sidebar.selectbox(
+                "Low Center",
+                options=time_interval_strings,
+                index=time_interval_strings.index('07:10') if '07:10' in time_interval_strings else 36,
+                help="Low range will be ±30 min around this time"
+            )
         
-        for minutes in range(start_minutes, end_minutes + 1, 5):
-            hours = minutes // 60
-            mins = minutes % 60
-            intervals.append(time(hours, mins))
+        # Calculate High range
+        high_center_time = datetime.strptime(high_center_time_str, '%H:%M').time()
+        high_center_minutes = high_center_time.hour * 60 + high_center_time.minute
+        high_start_minutes = max(4 * 60, high_center_minutes - 30)
+        high_end_minutes = min(15 * 60 + 55, high_center_minutes + 30)
+        high_start_minutes = (high_start_minutes // 5) * 5
+        high_end_minutes = (high_end_minutes // 5) * 5
+        high_start = time(high_start_minutes // 60, high_start_minutes % 60)
+        high_end = time(high_end_minutes // 60, high_end_minutes % 60)
         
-        return intervals
-    
-    time_intervals = generate_5min_intervals()
-    time_interval_strings = [t.strftime('%H:%M') for t in time_intervals]
+        # Calculate Low range
+        low_center_time = datetime.strptime(low_center_time_str, '%H:%M').time()
+        low_center_minutes = low_center_time.hour * 60 + low_center_time.minute
+        low_start_minutes = max(4 * 60, low_center_minutes - 30)
+        low_end_minutes = min(15 * 60 + 55, low_center_minutes + 30)
+        low_start_minutes = (low_start_minutes // 5) * 5
+        low_end_minutes = (low_end_minutes // 5) * 5
+        low_start = time(low_start_minutes // 60, low_start_minutes % 60)
+        low_end = time(low_end_minutes // 60, low_end_minutes % 60)
+        
+        st.sidebar.info(f"📍 High: {high_start.strftime('%H:%M')} - {high_end.strftime('%H:%M')}\n\n📍 Low: {low_start.strftime('%H:%M')} - {low_end.strftime('%H:%M')}")
+    else:
+        # Manual time range filters (original behavior)
+        st.sidebar.markdown("---")
     
     # High time range filter
     st.sidebar.subheader("⬆️ High Formation Time Range")
-    high_start_str = st.sidebar.selectbox(
-        "High Start Time",
-        options=time_interval_strings,
-        index=0,  # Default to 4:00
-        help="Only consider highs that occurred after this time"
-    )
-    high_end_str = st.sidebar.selectbox(
-        "High End Time",
-        options=time_interval_strings,
-        index=len(time_interval_strings) - 1,  # Default to 15:55
-        help="Only consider highs that occurred before this time (inclusive)"
-    )
     
-    high_start = datetime.strptime(high_start_str, '%H:%M').time()
-    high_end = datetime.strptime(high_end_str, '%H:%M').time()
+    if not use_quick_filter:
+        high_start_str = st.sidebar.selectbox(
+            "High Start Time",
+            options=time_interval_strings,
+            index=0,  # Default to 4:00
+            help="Only consider highs that occurred after this time"
+        )
+        high_end_str = st.sidebar.selectbox(
+            "High End Time",
+            options=time_interval_strings,
+            index=len(time_interval_strings) - 1,  # Default to 15:55
+            help="Only consider highs that occurred before this time (inclusive)"
+        )
+        
+        high_start = datetime.strptime(high_start_str, '%H:%M').time()
+        high_end = datetime.strptime(high_end_str, '%H:%M').time()
+    else:
+        st.sidebar.text(f"Start: {high_start.strftime('%H:%M')}")
+        st.sidebar.text(f"End: {high_end.strftime('%H:%M')}")
     
     # Low time range filter
     st.sidebar.subheader("⬇️ Low Formation Time Range")
-    low_start_str = st.sidebar.selectbox(
-        "Low Start Time",
-        options=time_interval_strings,
-        index=0,  # Default to 4:00
-        help="Only consider lows that occurred after this time"
-    )
-    low_end_str = st.sidebar.selectbox(
-        "Low End Time",
-        options=time_interval_strings,
-        index=len(time_interval_strings) - 1,  # Default to 15:55
-        help="Only consider lows that occurred before this time (inclusive)"
-    )
     
-    low_start = datetime.strptime(low_start_str, '%H:%M').time()
-    low_end = datetime.strptime(low_end_str, '%H:%M').time()
+    if not use_quick_filter:
+        low_start_str = st.sidebar.selectbox(
+            "Low Start Time",
+            options=time_interval_strings,
+            index=0,  # Default to 4:00
+            help="Only consider lows that occurred after this time"
+        )
+        low_end_str = st.sidebar.selectbox(
+            "Low End Time",
+            options=time_interval_strings,
+            index=len(time_interval_strings) - 1,  # Default to 15:55
+            help="Only consider lows that occurred before this time (inclusive)"
+        )
+        
+        low_start = datetime.strptime(low_start_str, '%H:%M').time()
+        low_end = datetime.strptime(low_end_str, '%H:%M').time()
+    else:
+        st.sidebar.text(f"Start: {low_start.strftime('%H:%M')}")
+        st.sidebar.text(f"End: {low_end.strftime('%H:%M')}")
     
     # Observation time filter
     st.sidebar.subheader("👁️ Observation Time")
@@ -152,6 +221,45 @@ if uploaded_file is not None:
     st.sidebar.markdown("---")
     st.sidebar.metric("Filtered Records", len(filtered_df))
     st.sidebar.metric("Total Trading Days", filtered_df['date'].nunique())
+    
+    # Data Input Section at the bottom
+    st.sidebar.markdown("---")
+    st.sidebar.header("📁 Data Input")
+    
+    if default_file_loaded:
+        st.sidebar.success(f"✅ Auto-loaded: {os.path.basename(default_file_path)}")
+        st.sidebar.success(f"✅ Loaded {len(df)} records")
+        st.sidebar.info(f"📅 Date range: {df['date'].min().date()} to {df['date'].max().date()}")
+        
+        # Option to upload a different file
+        st.sidebar.markdown("**Or upload a different file:**")
+        uploaded_file = st.sidebar.file_uploader(
+            "Upload different CSV",
+            type=['csv'],
+            help="Upload a different candle_data_detailed_breakdown.csv file",
+            key="bottom_uploader"
+        )
+        
+        if uploaded_file is not None:
+            df = load_data(uploaded_file)
+            st.sidebar.success(f"✅ Loaded uploaded file")
+            st.rerun()
+    else:
+        # No default file found
+        st.sidebar.warning("⚠️ No default file found")
+        st.sidebar.markdown("**Please upload a CSV file:**")
+        uploaded_file = st.sidebar.file_uploader(
+            "Upload detailed breakdown CSV",
+            type=['csv'],
+            help="Upload the candle_data_detailed_breakdown.csv file",
+            key="bottom_uploader"
+        )
+        
+        if uploaded_file is not None:
+            df = load_data(uploaded_file)
+            st.sidebar.success(f"✅ Loaded {len(df)} records")
+            st.sidebar.info(f"📅 Date range: {df['date'].min().date()} to {df['date'].max().date()}")
+            st.rerun()
     
     if len(filtered_df) == 0:
         st.warning("⚠️ No data matches your filter criteria. Please adjust the time ranges.")
@@ -343,8 +451,8 @@ if uploaded_file is not None:
                 
                 # Define colors for each category
                 colors_map = {
-                    'High Breaks First': '#e74c3c',
-                    'Low Breaks First': '#3498db',
+                    'High Breaks First': '#2ecc71',  # Green for High
+                    'Low Breaks First': '#e74c3c',   # Red for Low
                     'Both Break Same Time': '#95a5a6'
                 }
                 
@@ -378,14 +486,14 @@ if uploaded_file is not None:
                 
                 with col1:
                     st.metric(
-                        "🔴 High Breaks First",
+                        "🟢 High Breaks First",
                         f"{break_pcts.get('High Breaks First', 0):.1f}%",
                         delta=f"{break_counts.get('High Breaks First', 0)} days"
                     )
                 
                 with col2:
                     st.metric(
-                        "🔵 Low Breaks First",
+                        "🔴 Low Breaks First",
                         f"{break_pcts.get('Low Breaks First', 0):.1f}%",
                         delta=f"{break_counts.get('Low Breaks First', 0)} days"
                     )
@@ -459,8 +567,8 @@ if uploaded_file is not None:
                         x=bucket_labels,
                         y=bucket_counts.values,
                         marker=dict(
-                            color='#e74c3c',
-                            line=dict(color='#c0392b', width=2)  # Border for bars
+                            color='#2ecc71',  # Green for High
+                            line=dict(color='#27ae60', width=2)  # Dark green border
                         ),
                         hovertext=hover_text,
                         hoverinfo='text',
@@ -509,8 +617,8 @@ if uploaded_file is not None:
                         x=bucket_labels,
                         y=bucket_counts.values,
                         marker=dict(
-                            color='#3498db',
-                            line=dict(color='#2980b9', width=2)  # Border for bars
+                            color='#e74c3c',  # Red for Low
+                            line=dict(color='#c0392b', width=2)  # Dark red border
                         ),
                         hovertext=hover_text,
                         hoverinfo='text',
@@ -570,7 +678,7 @@ if uploaded_file is not None:
             y=line_df['high_hold_pct'],
             mode='lines+markers',
             name='High Hold %',
-            line=dict(color='#2ecc71', width=3),
+            line=dict(color='#2ecc71', width=3),  # Green for High
             marker=dict(size=8)
         ))
         
@@ -579,7 +687,7 @@ if uploaded_file is not None:
             y=line_df['low_hold_pct'],
             mode='lines+markers',
             name='Low Hold %',
-            line=dict(color='#e74c3c', width=3),
+            line=dict(color='#e74c3c', width=3),  # Red for Low
             marker=dict(size=8)
         ))
         
@@ -655,29 +763,47 @@ if uploaded_file is not None:
 
 else:
     # Instructions when no file is uploaded
-    st.info("👈 Please upload your `candle_data_detailed_breakdown.csv` file using the sidebar.")
+    st.info("👈 Please check the Data Input section at the bottom of the sidebar.")
+    
+    # Add data input section at bottom of sidebar
+    st.sidebar.header("📁 Data Input")
+    st.sidebar.warning("⚠️ No data loaded")
+    st.sidebar.markdown("**Please upload a CSV file or place `candle_data_detailed_breakdown.csv` in the app directory:**")
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload detailed breakdown CSV",
+        type=['csv'],
+        help="Upload the candle_data_detailed_breakdown.csv file",
+        key="initial_uploader"
+    )
+    
+    if uploaded_file is not None:
+        df = load_data(uploaded_file)
+        st.sidebar.success(f"✅ Loaded {len(df)} records")
+        st.sidebar.info(f"📅 Date range: {df['date'].min().date()} to {df['date'].max().date()}")
+        st.rerun()
     
     st.markdown("""
     ### How to use this app:
     
-    1. **Upload your data**: Use the file uploader in the sidebar to upload `candle_data_detailed_breakdown.csv`
+    1. **Load your data**:
+       - **Option A**: Place `candle_data_detailed_breakdown.csv` in the same directory as this app (auto-loads)
+       - **Option B**: Upload the file using the uploader at the bottom of the sidebar
     
     2. **Set time filters**:
-       - **High Formation Range**: Time window when you want to consider highs (e.g., 4:00-4:20)
-       - **Low Formation Range**: Time window when you want to consider lows (e.g., 5:15-7:15)
+       - **Quick Filter**: Enable to set ±30 min windows around center times for High and Low
+       - **Manual Filters**: Precisely select High and Low formation time ranges
        - **Observation Time**: When to check if levels hold (default: 16:00)
     
     3. **Explore visualizations**:
        - **Line Chart**: See how hold probabilities change throughout the day
-       - **Heatmap**: Analyze patterns across dates and weekdays
-       - **Scatter Plot**: Visualize high/low values vs their formation times
-       - **Bar Charts**: Compare hold vs break statistics
+       - **Break Sequence Analysis**: See which level (High or Low) typically breaks first
+       - **Break Timing**: Understand when breaks typically occur
     
     4. **Download results**: Export filtered data for further analysis
     
     ### Example Use Case:
-    *"I want to know: if a high forms between 4:00-4:20 and a low forms between 5:15-7:15, 
-    what's the probability they'll both hold until 16:00 (end of day)?"*
+    *"I want to know: if a high forms around 7:10 (±30min) and a low forms around 9:30 (±30min), 
+    what's the probability they'll both hold until 16:00 (end of day)? And which one typically breaks first?"*
     
     This app will show you exactly that, with detailed visualizations! 📊
     """)
