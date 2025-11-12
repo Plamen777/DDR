@@ -1,1154 +1,683 @@
 #!/usr/bin/env python3
 """
-CL Futures Candle Data Analyzer - Streamlit Dashboard
-Interactive analysis of daily high/low extremities with time clustering.
+Streamlit App for Crude Oil High/Low Probability Analysis
+Interactive visualization with time range filters for high/low formation periods
 """
 
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
-from datetime import time, datetime, timedelta
+import plotly.express as px
+from datetime import time, datetime
 import numpy as np
 
+# Page configuration
+st.set_page_config(
+    page_title="Crude Oil Probability Analysis",
+    page_icon="📊",
+    layout="wide"
+)
 
-# Time cluster definitions
-CLUSTERS = {
-    'ODRS': (time(4, 0, 0), time(8, 25, 0)),
-    'RDRT': (time(8, 30, 0), time(9, 25, 0)),
-    'RDRB': (time(9, 30, 0), time(10, 25, 0)),
-    'RDRS': (time(10, 30, 0), time(15, 55, 0))
-}
+# Title and description
+st.title("📊 Crude Oil High/Low Probability Analysis")
+st.markdown("""
+Analyze the probability of intraday highs and lows holding until end of trading day.
+Filter by specific time ranges to see when your highs and lows were established.
+""")
 
-SESSION_START = time(4, 0, 0)
-SESSION_END = time(15, 55, 0)
+# File uploader
+st.sidebar.header("📁 Data Input")
+uploaded_file = st.sidebar.file_uploader(
+    "Upload detailed breakdown CSV",
+    type=['csv'],
+    help="Upload the candle_data_detailed_breakdown.csv file"
+)
 
-# Color schemes
-CLUSTER_COLORS = {
-    'ODRS': '#3498db',  # Blue
-    'RDRT': '#e74c3c',  # Red
-    'RDRB': '#f39c12',  # Orange
-    'RDRS': '#9b59b6'   # Purple
-}
-
-EXT_COLORS = {
-    'High': '#e74c3c',  # Red
-    'Low': '#3498db',   # Blue
-    'N/A': '#95a5a6'    # Gray
-}
-
-
-def get_percentage_color(percentage):
-    """
-    Generate color based on percentage using green-red spectrum with transparency.
-    Higher percentages have more opacity, lower percentages are more transparent.
-    Returns rgba color code for subtle visualization.
-    """
-    # Calculate opacity based on percentage (0.3 to 1.0 range for visibility)
-    opacity = 0.3 + (percentage / 100) * 0.7
-    
-    if percentage >= 40:
-        # Green for high percentages
-        return f'rgba(46, 204, 113, {opacity})'  # #2ecc71 with opacity
-    elif percentage >= 30:
-        # Light green
-        return f'rgba(52, 152, 219, {opacity})'  # #3498db blue-green with opacity
-    elif percentage >= 20:
-        # Yellow
-        return f'rgba(241, 196, 15, {opacity})'  # #f1c40f with opacity
-    elif percentage >= 10:
-        # Orange
-        return f'rgba(230, 126, 34, {opacity})'  # #e67e22 with opacity
-    else:
-        # Red for low percentages
-        return f'rgba(231, 76, 60, {opacity})'  # #e74c3c with opacity
-
-
-def get_text_color_for_background(percentage):
-    """
-    Return appropriate text color (black or white) based on background percentage.
-    Darker backgrounds (high percentage) need white text, lighter backgrounds need black text.
-    """
-    if percentage >= 40:
-        return 'white'
-    elif percentage >= 20:
-        return 'black'
-    else:
-        return 'black'
-
-
-
-@st.cache_data
-def load_data():
-    """Load the fullday analysis CSV file."""
-    try:
-        df = pd.read_csv('fullday_analysis.csv')
-        
-        # Convert time columns to time objects
-        for col in ['high_time', 'low_time', 'RDRT_EXT_TIME', 'RDRB_EXT_TIME']:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], format='%H:%M:%S', errors='coerce').dt.time
-        
-        # Convert date to datetime
-        df['date'] = pd.to_datetime(df['date'])
-        
-        return df
-    except FileNotFoundError:
-        st.error("Error: fullday_analysis.csv not found. Please run analyze_candles.py first.")
-        return None
-
-
-@st.cache_data
-def load_candle_data():
-    """Load raw candle data for cut-off analysis."""
-    try:
-        df = pd.read_csv('candle_data.csv')
-        
-        # Detect timestamp column
-        timestamp_cols = ['timestamp', 'datetime', 'date', 'time', 'Date', 'DateTime', 'Timestamp']
-        timestamp_col = None
-        for col in timestamp_cols:
-            if col in df.columns:
-                timestamp_col = col
-                break
-        
-        if timestamp_col is None:
-            timestamp_col = df.columns[0]
-        
-        # Convert to datetime
-        df['datetime'] = pd.to_datetime(df[timestamp_col])
-        df['date'] = df['datetime'].dt.date
-        df['time'] = df['datetime'].dt.time
-        
-        # Optimize numeric columns
-        for col in ['high', 'low', 'open', 'close']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        return df
-    except FileNotFoundError:
-        st.warning("candle_data.csv not found. Cut-off analysis will not be available.")
-        return None
-
-
-def time_in_range(t, start, end):
-    """Check if time t is within range [start, end] inclusive."""
-    if t is None:
-        return False
-    return start <= t <= end
-
-
-def get_color_from_percentage(percentage):
-    """
-    Generate color based on percentage using green-red spectrum.
-    High percentage (>30%) = Green
-    Medium percentage (10-30%) = Yellow/Orange
-    Low percentage (<10%) = Red
-    
-    Returns hex color code.
-    """
-    if percentage >= 30:
-        # Green spectrum (30% and above)
-        # Interpolate from yellow-green to dark green
-        ratio = min((percentage - 30) / 40, 1.0)  # 30-70% range
-        r = int(144 - ratio * 44)  # 144 -> 100
-        g = int(238 - ratio * 68)  # 238 -> 170
-        b = int(144 - ratio * 94)  # 144 -> 50
-    elif percentage >= 10:
-        # Yellow to Orange spectrum (10-30%)
-        ratio = (percentage - 10) / 20  # 10-30% range
-        r = int(255 - ratio * 111)  # 255 -> 144
-        g = int(193 + ratio * 45)   # 193 -> 238
-        b = int(7 + ratio * 137)    # 7 -> 144
-    else:
-        # Red spectrum (below 10%)
-        # Darker red for very low percentages
-        ratio = percentage / 10
-        r = int(139 + ratio * 116)  # 139 -> 255
-        g = int(0 + ratio * 193)    # 0 -> 193
-        b = int(0 + ratio * 7)      # 0 -> 7
-    
-    return f'#{r:02x}{g:02x}{b:02x}'
-
-
-def classify_time_to_cluster(t):
-    """Classify a time into one of the clusters."""
-    if t is None:
-        return None
-    
-    for cluster_name, (start, end) in CLUSTERS.items():
-        if time_in_range(t, start, end):
-            return cluster_name
-    return None
-
-
-def analyze_cutoff_by_cluster(candle_df, fullday_df, cutoff_time, cluster_filter=None):
-    """
-    Analyze how often highs/lows from specific clusters hold until session end
-    when checked at a given cut-off time.
-    
-    Args:
-        candle_df: Raw candle data
-        fullday_df: Full day analysis with cluster classifications
-        cutoff_time: Time to check if extremes hold
-        cluster_filter: Optional cluster to filter by (ODRS, RDRT, RDRB, RDRS)
-    
-    Returns:
-        Dictionary with hold statistics by cluster
-    """
-    if candle_df is None or fullday_df is None:
-        return None
-    
-    # Add cluster classifications to fullday_df if not present
-    if 'high_cluster' not in fullday_df.columns:
-        fullday_df['high_cluster'] = fullday_df['high_time'].apply(classify_time_to_cluster)
-    if 'low_cluster' not in fullday_df.columns:
-        fullday_df['low_cluster'] = fullday_df['low_time'].apply(classify_time_to_cluster)
-    
-    # Filter by cluster if specified
-    if cluster_filter:
-        fullday_filtered = fullday_df[
-            (fullday_df['high_cluster'] == cluster_filter) | 
-            (fullday_df['low_cluster'] == cluster_filter)
-        ].copy()
-    else:
-        fullday_filtered = fullday_df.copy()
-    
-    if len(fullday_filtered) == 0:
-        return None
-    
-    # Get dates to analyze
-    dates_to_analyze = fullday_filtered['date'].dt.date.unique()
-    
-    # Filter candle data to relevant dates
-    candle_filtered = candle_df[candle_df['date'].isin(dates_to_analyze)].copy()
-    
-    # Create masks for before and after cutoff
-    candle_filtered['before_cutoff'] = candle_filtered['time'] <= cutoff_time
-    candle_filtered['after_cutoff'] = candle_filtered['time'] > cutoff_time
-    
-    # Group by date
-    grouped = candle_filtered.groupby('date')
-    
-    # Check which dates have data before and after cutoff
-    before_counts = grouped['before_cutoff'].sum()
-    after_counts = grouped['after_cutoff'].sum()
-    valid_dates = (before_counts > 0) & (after_counts > 0)
-    
-    if valid_dates.sum() == 0:
-        return None
-    
-    valid_date_list = valid_dates[valid_dates].index
-    candle_valid = candle_filtered[candle_filtered['date'].isin(valid_date_list)].copy()
-    
-    # Split into before and after cutoff
-    before_df = candle_valid[candle_valid['before_cutoff']]
-    after_df = candle_valid[candle_valid['after_cutoff']]
-    
-    # Aggregate
-    before_agg = before_df.groupby('date').agg({
-        'high': 'max',
-        'low': 'min'
-    }).rename(columns={'high': 'cutoff_high', 'low': 'cutoff_low'})
-    
-    after_agg = after_df.groupby('date').agg({
-        'high': 'max',
-        'low': 'min'
-    }).rename(columns={'high': 'post_high', 'low': 'post_low'})
-    
-    # Merge
-    results = before_agg.join(after_agg, how='inner')
-    results['high_held'] = results['post_high'] <= results['cutoff_high']
-    results['low_held'] = results['post_low'] >= results['cutoff_low']
-    
-    # Join with fullday data to get cluster info
-    fullday_for_merge = fullday_filtered.copy()
-    fullday_for_merge['date'] = fullday_for_merge['date'].dt.date
-    fullday_for_merge = fullday_for_merge.set_index('date')
-    
-    results = results.join(fullday_for_merge[['high_cluster', 'low_cluster', 'high_time', 'low_time']], how='inner')
-    
-    # Calculate statistics by cluster
-    stats = {}
-    
-    for cluster in ['ODRS', 'RDRT', 'RDRB', 'RDRS']:
-        # Highs from this cluster
-        high_in_cluster = results[results['high_cluster'] == cluster]
-        if len(high_in_cluster) > 0:
-            high_held_count = high_in_cluster['high_held'].sum()
-            high_held_pct = (high_held_count / len(high_in_cluster)) * 100
-        else:
-            high_held_count = 0
-            high_held_pct = 0
-        
-        # Lows from this cluster
-        low_in_cluster = results[results['low_cluster'] == cluster]
-        if len(low_in_cluster) > 0:
-            low_held_count = low_in_cluster['low_held'].sum()
-            low_held_pct = (low_held_count / len(low_in_cluster)) * 100
-        else:
-            low_held_count = 0
-            low_held_pct = 0
-        
-        stats[cluster] = {
-            'high_total': len(high_in_cluster),
-            'high_held_count': int(high_held_count),
-            'high_held_pct': float(high_held_pct),
-            'low_total': len(low_in_cluster),
-            'low_held_count': int(low_held_count),
-            'low_held_pct': float(low_held_pct)
-        }
-    
-    return stats
-
-
-def filter_data(df, high_filters, low_filters, rdrt_ext_filter=None, rdrb_ext_filter=None):
-    """
-    Filter dataframe based on high and low time cluster selections and EXT status.
-    
-    Args:
-        df: DataFrame with fullday analysis
-        high_filters: List of cluster names or custom time ranges for highs
-        low_filters: List of cluster names or custom time ranges for lows
-        rdrt_ext_filter: Filter for RDRT_EXT_STATUS ('High', 'Low', 'N/A', or None for all)
-        rdrb_ext_filter: Filter for RDRB_EXT_STATUS ('High', 'Low', 'N/A', or None for all)
-    
-    Returns:
-        Filtered DataFrame
-    """
-    if df is None or df.empty:
-        return df
-    
-    # Add cluster classification columns if not present
-    if 'high_cluster' not in df.columns:
-        df['high_cluster'] = df['high_time'].apply(classify_time_to_cluster)
-    if 'low_cluster' not in df.columns:
-        df['low_cluster'] = df['low_time'].apply(classify_time_to_cluster)
-    
-    # Start with all rows
-    mask = pd.Series([True] * len(df), index=df.index)
-    
-    # Apply high filters
-    if high_filters and 'All' not in high_filters:
-        high_mask = pd.Series([False] * len(df), index=df.index)
-        for filter_item in high_filters:
-            if isinstance(filter_item, tuple):  # Custom time range
-                start, end = filter_item
-                high_mask |= df['high_time'].apply(lambda t: time_in_range(t, start, end))
-            else:  # Cluster name
-                high_mask |= (df['high_cluster'] == filter_item)
-        mask &= high_mask
-    
-    # Apply low filters
-    if low_filters and 'All' not in low_filters:
-        low_mask = pd.Series([False] * len(df), index=df.index)
-        for filter_item in low_filters:
-            if isinstance(filter_item, tuple):  # Custom time range
-                start, end = filter_item
-                low_mask |= df['low_time'].apply(lambda t: time_in_range(t, start, end))
-            else:  # Cluster name
-                low_mask |= (df['low_cluster'] == filter_item)
-        mask &= low_mask
-    
-    # Apply RDRT_EXT filter
-    if rdrt_ext_filter:
-        if rdrt_ext_filter == 'N/A':
-            # N/A means False or neither High nor Low (None/NaN)
-            mask &= (df['RDRT_EXT_STATUS'] == 'False') | (df['RDRT_EXT_STATUS'].isna())
-        else:
-            mask &= (df['RDRT_EXT_STATUS'] == rdrt_ext_filter)
-    
-    # Apply RDRB_EXT filter
-    if rdrb_ext_filter:
-        if rdrb_ext_filter == 'N/A':
-            # N/A means False or neither High nor Low (None/NaN)
-            mask &= (df['RDRB_EXT_STATUS'] == 'False') | (df['RDRB_EXT_STATUS'].isna())
-        else:
-            mask &= (df['RDRB_EXT_STATUS'] == rdrb_ext_filter)
-    
-    return df[mask]
-
-
-def time_to_minutes(t):
-    """Convert time object to minutes since 00:00."""
-    if t is None:
-        return None
-    return t.hour * 60 + t.minute
-
-
-def bucket_time(t, bucket_size=5):
-    """
-    Bucket a time into intervals.
-    
-    Args:
-        t: time object
-        bucket_size: bucket size in minutes (5, 15, or 30)
-    
-    Returns:
-        Start time of the bucket
-    """
-    if t is None:
-        return None
-    
-    minutes = time_to_minutes(t)
-    bucketed_minutes = (minutes // bucket_size) * bucket_size
-    
-    hours = bucketed_minutes // 60
-    mins = bucketed_minutes % 60
-    
-    return time(hours, mins)
-
-
-def create_time_distribution_chart(df, bucket_size=5):
-    """
-    Create a bar chart showing time distribution of highs and lows.
-    
-    Args:
-        df: Filtered DataFrame
-        bucket_size: Time bucket size in minutes (5, 15, or 30)
-    
-    Returns:
-        Plotly figure
-    """
-    if df is None or df.empty:
-        return None
-    
-    # Create bucketed times
-    high_buckets = df['high_time'].apply(lambda t: bucket_time(t, bucket_size))
-    low_buckets = df['low_time'].apply(lambda t: bucket_time(t, bucket_size))
-    
-    # Count occurrences
-    high_counts = high_buckets.value_counts().sort_index()
-    low_counts = low_buckets.value_counts().sort_index()
-    
-    # Create time labels
-    all_buckets = sorted(set(high_counts.index) | set(low_counts.index))
-    time_labels = [t.strftime('%H:%M') if t else 'Unknown' for t in all_buckets]
-    
-    # Prepare data
-    high_values = [high_counts.get(t, 0) for t in all_buckets]
-    low_values = [low_counts.get(t, 0) for t in all_buckets]
-    
-    # Create figure with consistent colors
-    fig = go.Figure()
-    
-    fig.add_trace(go.Bar(
-        name='High',
-        x=time_labels,
-        y=high_values,
-        marker_color='#e74c3c'  # Consistent red
-    ))
-    
-    fig.add_trace(go.Bar(
-        name='Low',
-        x=time_labels,
-        y=low_values,
-        marker_color='#3498db'  # Consistent blue
-    ))
-    
-    fig.update_layout(
-        title=f'Time Distribution of Highs and Lows ({bucket_size}-minute buckets)',
-        xaxis_title='Time',
-        yaxis_title='Count',
-        barmode='group',
-        height=500,
-        hovermode='x unified',
-        xaxis={'tickangle': -45}
-    )
-    
-    return fig
-
-
-def display_cluster_statistics(df):
-    """Display dataset count and percentage breakdown by cluster."""
-    if df is None or df.empty:
-        st.warning("No data to display.")
-        return
-    
-    # Add cluster classifications
-    df['high_cluster'] = df['high_time'].apply(classify_time_to_cluster)
-    df['low_cluster'] = df['low_time'].apply(classify_time_to_cluster)
-    
-    total_count = len(df)
-    
-    st.subheader(f"📊 Dataset Statistics (Total: {total_count} days)")
-    
-    # Create two columns for High and Low statistics
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("### High Extremities")
-        high_counts = df['high_cluster'].value_counts()
-        
-        # Create dataframe for display with color-coded percentages
-        high_stats = []
-        high_colors = []
-        for cluster in ['ODRS', 'RDRT', 'RDRB', 'RDRS']:
-            count = high_counts.get(cluster, 0)
-            percentage = (count / total_count * 100) if total_count > 0 else 0
-            color = get_percentage_color(percentage)  # Use percentage-based color
-            high_colors.append(color)
-            high_stats.append({
-                'Cluster': cluster,
-                'Time Range': f"{CLUSTERS[cluster][0].strftime('%H:%M')}-{CLUSTERS[cluster][1].strftime('%H:%M')}",
-                'Count': count,
-                'Percentage': f"{percentage:.1f}%"
-            })
-        
-        high_df = pd.DataFrame(high_stats)
-        
-        # Display table with colored styling
-        st.markdown("""
-        <style>
-        .cluster-table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        .cluster-table th {
-            background-color: #34495e;
-            color: white;
-            padding: 10px;
-            text-align: left;
-        }
-        .cluster-table td {
-            padding: 8px;
-            border-bottom: 1px solid #ddd;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-        
-        # Build HTML table with dynamic coloring
-        table_html = '<table class="cluster-table"><tr><th>Cluster</th><th>Time Range</th><th>Count</th><th>Percentage</th></tr>'
-        for idx, row in high_df.iterrows():
-            count = row['Count']
-            percentage_val = float(row['Percentage'].rstrip('%'))
-            bg_color = get_percentage_color(percentage_val)
-            text_color = get_text_color_for_background(percentage_val)
-            table_html += f'<tr><td><strong>{row["Cluster"]}</strong></td><td>{row["Time Range"]}</td>'
-            table_html += f'<td>{count}</td><td style="background-color: {bg_color}; color: {text_color}; font-weight: bold; text-align: center;">{row["Percentage"]}</td></tr>'
-        table_html += '</table>'
-        st.markdown(table_html, unsafe_allow_html=True)
-        
-        # Pie chart for highs - use soft pastel colors with gradient
-        pastel_colors = ['#FFB6C1', '#87CEEB', '#98FB98', '#DDA0DD']  # Soft pastel palette
-        fig_high = go.Figure(data=[go.Pie(
-            labels=high_df['Cluster'],
-            values=high_df['Count'],
-            marker=dict(
-                colors=pastel_colors[:len(high_df)],
-                line=dict(color='white', width=2)
-            ),
-            textinfo='label+percent',
-            textfont=dict(size=14),
-            hovertemplate='<b>%{label}</b><br>Count: %{value}<br>Percentage: %{percent}<extra></extra>',
-            pull=[0.05 if high_df.iloc[i]['Count'] == high_df['Count'].max() else 0 for i in range(len(high_df))]  # Highlight max
-        )])
-        fig_high.update_layout(
-            title='High Distribution',
-            showlegend=True,
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)'
-        )
-        st.plotly_chart(fig_high, use_container_width=True)
-    
-    with col2:
-        st.markdown("### Low Extremities")
-        low_counts = df['low_cluster'].value_counts()
-        
-        # Create dataframe for display with color-coded percentages
-        low_stats = []
-        low_colors = []
-        for cluster in ['ODRS', 'RDRT', 'RDRB', 'RDRS']:
-            count = low_counts.get(cluster, 0)
-            percentage = (count / total_count * 100) if total_count > 0 else 0
-            color = get_percentage_color(percentage)  # Use percentage-based color
-            low_colors.append(color)
-            low_stats.append({
-                'Cluster': cluster,
-                'Time Range': f"{CLUSTERS[cluster][0].strftime('%H:%M')}-{CLUSTERS[cluster][1].strftime('%H:%M')}",
-                'Count': count,
-                'Percentage': f"{percentage:.1f}%"
-            })
-        
-        low_df = pd.DataFrame(low_stats)
-        
-        # Build HTML table with dynamic coloring
-        table_html = '<table class="cluster-table"><tr><th>Cluster</th><th>Time Range</th><th>Count</th><th>Percentage</th></tr>'
-        for idx, row in low_df.iterrows():
-            count = row['Count']
-            percentage_val = float(row['Percentage'].rstrip('%'))
-            bg_color = get_percentage_color(percentage_val)
-            text_color = get_text_color_for_background(percentage_val)
-            table_html += f'<tr><td><strong>{row["Cluster"]}</strong></td><td>{row["Time Range"]}</td>'
-            table_html += f'<td>{count}</td><td style="background-color: {bg_color}; color: {text_color}; font-weight: bold; text-align: center;">{row["Percentage"]}</td></tr>'
-        table_html += '</table>'
-        st.markdown(table_html, unsafe_allow_html=True)
-        
-        # Pie chart for lows - use complementary soft colors
-        pastel_colors_low = ['#B0E0E6', '#FFDAB9', '#E6E6FA', '#F0E68C']  # Complementary soft palette
-        fig_low = go.Figure(data=[go.Pie(
-            labels=low_df['Cluster'],
-            values=low_df['Count'],
-            marker=dict(
-                colors=pastel_colors_low[:len(low_df)],
-                line=dict(color='white', width=2)
-            ),
-            textinfo='label+percent',
-            textfont=dict(size=14),
-            hovertemplate='<b>%{label}</b><br>Count: %{value}<br>Percentage: %{percent}<extra></extra>',
-            pull=[0.05 if low_df.iloc[i]['Count'] == low_df['Count'].max() else 0 for i in range(len(low_df))]  # Highlight max
-        )])
-        fig_low.update_layout(
-            title='Low Distribution',
-            showlegend=True,
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)'
-        )
-        st.plotly_chart(fig_low, use_container_width=True)
-
-
-def display_ext_statistics(df):
-    """Display RDRT_EXT and RDRB_EXT statistics."""
-    if df is None or df.empty:
-        st.warning("No data to display.")
-        return
-    
-    total_count = len(df)
-    
-    st.subheader(f"🎯 EXT Status Statistics")
-    
-    # Create two columns for RDRT_EXT and RDRB_EXT
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("### RDRT_EXT Status")
-        st.markdown("*8:30 - 9:25 window*")
-        
-        # Count statuses, treating False and NaN as N/A
-        rdrt_status = df['RDRT_EXT_STATUS'].copy()
-        rdrt_status = rdrt_status.fillna('N/A')
-        rdrt_status = rdrt_status.replace('False', 'N/A')
-        rdrt_counts = rdrt_status.value_counts()
-        
-        # Create dataframe for display
-        rdrt_stats = []
-        rdrt_colors = []
-        for status in ['High', 'Low', 'N/A']:
-            count = rdrt_counts.get(status, 0)
-            percentage = (count / total_count * 100) if total_count > 0 else 0
-            color = get_percentage_color(percentage)  # Use percentage-based color
-            rdrt_colors.append(color)
-            rdrt_stats.append({
-                'Status': status,
-                'Count': count,
-                'Percentage': f"{percentage:.1f}%"
-            })
-        
-        rdrt_df = pd.DataFrame(rdrt_stats)
-        
-        # Build HTML table with dynamic coloring
-        table_html = '<table class="cluster-table"><tr><th>Status</th><th>Count</th><th>Percentage</th></tr>'
-        for idx, row in rdrt_df.iterrows():
-            count = row['Count']
-            percentage_val = float(row['Percentage'].rstrip('%'))
-            bg_color = get_percentage_color(percentage_val)
-            text_color = get_text_color_for_background(percentage_val)
-            table_html += f'<tr><td><strong>{row["Status"]}</strong></td>'
-            table_html += f'<td>{count}</td><td style="background-color: {bg_color}; color: {text_color}; font-weight: bold; text-align: center;">{row["Percentage"]}</td></tr>'
-        table_html += '</table>'
-        st.markdown(table_html, unsafe_allow_html=True)
-        
-        # Pie chart for RDRT_EXT - use semantic colors
-        status_colors = {
-            'High': '#FF6B6B',    # Soft red for highs
-            'Low': '#4ECDC4',     # Soft teal for lows
-            'N/A': '#95A5A6'      # Gray for N/A
-        }
-        rdrt_pie_colors = [status_colors.get(status, '#95A5A6') for status in rdrt_df['Status']]
-        
-        fig_rdrt = go.Figure(data=[go.Pie(
-            labels=rdrt_df['Status'],
-            values=rdrt_df['Count'],
-            marker=dict(
-                colors=rdrt_pie_colors,
-                line=dict(color='white', width=2)
-            ),
-            textinfo='label+percent',
-            textfont=dict(size=14),
-            hovertemplate='<b>%{label}</b><br>Count: %{value}<br>Percentage: %{percent}<extra></extra>',
-            pull=[0.05 if rdrt_df.iloc[i]['Count'] == rdrt_df['Count'].max() else 0 for i in range(len(rdrt_df))]
-        )])
-        fig_rdrt.update_layout(
-            title='RDRT_EXT Distribution',
-            showlegend=True,
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)'
-        )
-        st.plotly_chart(fig_rdrt, use_container_width=True)
-    
-    with col2:
-        st.markdown("### RDRB_EXT Status")
-        st.markdown("*9:30 - 10:25 window*")
-        
-        # Count statuses, treating False and NaN as N/A
-        rdrb_status = df['RDRB_EXT_STATUS'].copy()
-        rdrb_status = rdrb_status.fillna('N/A')
-        rdrb_status = rdrb_status.replace('False', 'N/A')
-        rdrb_counts = rdrb_status.value_counts()
-        
-        # Create dataframe for display
-        rdrb_stats = []
-        rdrb_colors = []
-        for status in ['High', 'Low', 'N/A']:
-            count = rdrb_counts.get(status, 0)
-            percentage = (count / total_count * 100) if total_count > 0 else 0
-            color = get_percentage_color(percentage)  # Use percentage-based color
-            rdrb_colors.append(color)
-            rdrb_stats.append({
-                'Status': status,
-                'Count': count,
-                'Percentage': f"{percentage:.1f}%"
-            })
-        
-        rdrb_df = pd.DataFrame(rdrb_stats)
-        
-        # Build HTML table with dynamic coloring
-        table_html = '<table class="cluster-table"><tr><th>Status</th><th>Count</th><th>Percentage</th></tr>'
-        for idx, row in rdrb_df.iterrows():
-            count = row['Count']
-            percentage_val = float(row['Percentage'].rstrip('%'))
-            bg_color = get_percentage_color(percentage_val)
-            text_color = get_text_color_for_background(percentage_val)
-            table_html += f'<tr><td><strong>{row["Status"]}</strong></td>'
-            table_html += f'<td>{count}</td><td style="background-color: {bg_color}; color: {text_color}; font-weight: bold; text-align: center;">{row["Percentage"]}</td></tr>'
-        table_html += '</table>'
-        st.markdown(table_html, unsafe_allow_html=True)
-        
-        # Pie chart for RDRB_EXT - use semantic colors
-        status_colors = {
-            'High': '#FF6B6B',    # Soft red for highs
-            'Low': '#4ECDC4',     # Soft teal for lows
-            'N/A': '#95A5A6'      # Gray for N/A
-        }
-        rdrb_pie_colors = [status_colors.get(status, '#95A5A6') for status in rdrb_df['Status']]
-        
-        fig_rdrb = go.Figure(data=[go.Pie(
-            labels=rdrb_df['Status'],
-            values=rdrb_df['Count'],
-            marker=dict(
-                colors=rdrb_pie_colors,
-                line=dict(color='white', width=2)
-            ),
-            textinfo='label+percent',
-            textfont=dict(size=14),
-            hovertemplate='<b>%{label}</b><br>Count: %{value}<br>Percentage: %{percent}<extra></extra>',
-            pull=[0.05 if rdrb_df.iloc[i]['Count'] == rdrb_df['Count'].max() else 0 for i in range(len(rdrb_df))]
-        )])
-        fig_rdrb.update_layout(
-            title='RDRB_EXT Distribution',
-            showlegend=True,
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)'
-        )
-        st.plotly_chart(fig_rdrb, use_container_width=True)
-
-
-def main():
-    st.set_page_config(
-        page_title="CL Futures Analysis Dashboard",
-        page_icon="📈",
-        layout="wide"
-    )
-    
-    st.title("📈 CL Futures Candle Data Analysis Dashboard")
-    st.markdown("Interactive analysis of daily high/low extremities with time clustering")
-    
+if uploaded_file is not None:
     # Load data
-    df = load_data()
+    @st.cache_data
+    def load_data(file):
+        df = pd.read_csv(file)
+        df['date'] = pd.to_datetime(df['date'])
+        df['high_time'] = pd.to_datetime(df['high_time'], format='%H:%M').dt.time
+        df['low_time'] = pd.to_datetime(df['low_time'], format='%H:%M').dt.time
+        df['observation_time'] = pd.to_datetime(df['observation_time'], format='%H:%M').dt.time
+        
+        # Handle break times (may be None/NaN)
+        if 'high_break_time' in df.columns:
+            df['high_break_time'] = pd.to_datetime(df['high_break_time'], format='%H:%M', errors='coerce').dt.time
+        if 'low_break_time' in df.columns:
+            df['low_break_time'] = pd.to_datetime(df['low_break_time'], format='%H:%M', errors='coerce').dt.time
+        
+        return df
     
-    if df is None:
-        return
+    df = load_data(uploaded_file)
+    
+    st.sidebar.success(f"✅ Loaded {len(df)} records")
+    st.sidebar.info(f"📅 Date range: {df['date'].min().date()} to {df['date'].max().date()}")
     
     # Sidebar filters
     st.sidebar.header("🔍 Filters")
     
-    # High filters
-    st.sidebar.subheader("High Extremity Filters")
-    high_cluster_options = ['ODRS', 'RDRT', 'RDRB', 'RDRS']
-    high_selections = st.sidebar.multiselect(
-        "Select time clusters for Highs",
-        options=high_cluster_options,
-        default=high_cluster_options  # All selected by default
-    )
+    # Time helper function
+    def time_to_minutes(t):
+        """Convert time object to minutes since midnight"""
+        return t.hour * 60 + t.minute
     
-    # Custom high range checkbox
-    high_use_custom = st.sidebar.checkbox("Use Custom Time Range for Highs", value=False, key='high_custom_check')
+    def minutes_to_time(minutes):
+        """Convert minutes since midnight to time object"""
+        return time(minutes // 60, minutes % 60)
     
-    high_filters = []
-    if high_use_custom:
-        # Custom range overwrites multiselection
-        st.sidebar.markdown("**Custom High Time Range:**")
-        high_custom_start = st.sidebar.time_input(
-            "Start time",
-            value=time(4, 0),
-            key='high_start'
-        )
-        high_custom_end = st.sidebar.time_input(
-            "End time",
-            value=time(15, 55),
-            key='high_end'
-        )
+    # Generate 5-minute intervals from 4:00 to 15:55
+    def generate_5min_intervals():
+        """Generate list of times in 5-minute intervals from 4:00 to 15:55"""
+        intervals = []
+        start_minutes = 4 * 60  # 4:00 in minutes
+        end_minutes = 15 * 60 + 55  # 15:55 in minutes
         
-        if high_custom_start >= SESSION_START and high_custom_end <= SESSION_END and high_custom_start < high_custom_end:
-            high_filters.append((high_custom_start, high_custom_end))
-        else:
-            st.sidebar.error(f"Custom range must be between {SESSION_START.strftime('%H:%M')} and {SESSION_END.strftime('%H:%M')} with start < end")
-    else:
-        # Use multiselect
-        if not high_selections:
-            high_filters = ['All']  # If nothing selected, include all
-        else:
-            high_filters = high_selections
-    
-    # Low filters
-    st.sidebar.subheader("Low Extremity Filters")
-    low_cluster_options = ['ODRS', 'RDRT', 'RDRB', 'RDRS']
-    low_selections = st.sidebar.multiselect(
-        "Select time clusters for Lows",
-        options=low_cluster_options,
-        default=low_cluster_options  # All selected by default
-    )
-    
-    # Custom low range checkbox
-    low_use_custom = st.sidebar.checkbox("Use Custom Time Range for Lows", value=False, key='low_custom_check')
-    
-    low_filters = []
-    if low_use_custom:
-        # Custom range overwrites multiselection
-        st.sidebar.markdown("**Custom Low Time Range:**")
-        low_custom_start = st.sidebar.time_input(
-            "Start time",
-            value=time(4, 0),
-            key='low_start'
-        )
-        low_custom_end = st.sidebar.time_input(
-            "End time",
-            value=time(15, 55),
-            key='low_end'
-        )
+        for minutes in range(start_minutes, end_minutes + 1, 5):
+            hours = minutes // 60
+            mins = minutes % 60
+            intervals.append(time(hours, mins))
         
-        if low_custom_start >= SESSION_START and low_custom_end <= SESSION_END and low_custom_start < low_custom_end:
-            low_filters.append((low_custom_start, low_custom_end))
-        else:
-            st.sidebar.error(f"Custom range must be between {SESSION_START.strftime('%H:%M')} and {SESSION_END.strftime('%H:%M')} with start < end")
-    else:
-        # Use multiselect
-        if not low_selections:
-            low_filters = ['All']  # If nothing selected, include all
-        else:
-            low_filters = low_selections
+        return intervals
     
-    st.sidebar.markdown("---")
+    time_intervals = generate_5min_intervals()
+    time_interval_strings = [t.strftime('%H:%M') for t in time_intervals]
     
-    # RDRT_EXT filter
-    st.sidebar.subheader("RDRT_EXT Filter")
-    st.sidebar.markdown("*8:30 - 9:25 window*")
-    rdrt_ext_filter = st.sidebar.selectbox(
-        "RDRT_EXT Status",
-        options=['All', 'High', 'Low', 'N/A'],
-        index=0,
-        key='rdrt_ext'
+    # High time range filter
+    st.sidebar.subheader("⬆️ High Formation Time Range")
+    high_start_str = st.sidebar.selectbox(
+        "High Start Time",
+        options=time_interval_strings,
+        index=0,  # Default to 4:00
+        help="Only consider highs that occurred after this time"
     )
-    if rdrt_ext_filter == 'All':
-        rdrt_ext_filter = None
-    
-    # RDRB_EXT filter
-    st.sidebar.subheader("RDRB_EXT Filter")
-    st.sidebar.markdown("*9:30 - 10:25 window*")
-    rdrb_ext_filter = st.sidebar.selectbox(
-        "RDRB_EXT Status",
-        options=['All', 'High', 'Low', 'N/A'],
-        index=0,
-        key='rdrb_ext'
+    high_end_str = st.sidebar.selectbox(
+        "High End Time",
+        options=time_interval_strings,
+        index=len(time_interval_strings) - 1,  # Default to 15:55
+        help="Only consider highs that occurred before this time (inclusive)"
     )
-    if rdrb_ext_filter == 'All':
-        rdrb_ext_filter = None
+    
+    high_start = datetime.strptime(high_start_str, '%H:%M').time()
+    high_end = datetime.strptime(high_end_str, '%H:%M').time()
+    
+    # Low time range filter
+    st.sidebar.subheader("⬇️ Low Formation Time Range")
+    low_start_str = st.sidebar.selectbox(
+        "Low Start Time",
+        options=time_interval_strings,
+        index=0,  # Default to 4:00
+        help="Only consider lows that occurred after this time"
+    )
+    low_end_str = st.sidebar.selectbox(
+        "Low End Time",
+        options=time_interval_strings,
+        index=len(time_interval_strings) - 1,  # Default to 15:55
+        help="Only consider lows that occurred before this time (inclusive)"
+    )
+    
+    low_start = datetime.strptime(low_start_str, '%H:%M').time()
+    low_end = datetime.strptime(low_end_str, '%H:%M').time()
+    
+    # Observation time filter
+    st.sidebar.subheader("👁️ Observation Time")
+    available_obs_times = sorted(df['observation_time'].unique())
+    
+    # Convert to datetime for display
+    obs_time_display = [datetime.combine(datetime.today(), t).strftime('%H:%M') for t in available_obs_times]
+    
+    default_index = len(available_obs_times) - 1  # Default to last time (16:00)
+    
+    selected_obs_time_str = st.sidebar.selectbox(
+        "Select Observation Time",
+        options=obs_time_display,
+        index=default_index,
+        help="Time at which to check if high/low levels hold"
+    )
+    
+    # Convert back to time object
+    selected_obs_time = datetime.strptime(selected_obs_time_str, '%H:%M').time()
     
     # Apply filters
-    filtered_df = filter_data(df.copy(), high_filters, low_filters, rdrt_ext_filter, rdrb_ext_filter)
+    filtered_df = df[
+        (df['high_time'] >= high_start) &
+        (df['high_time'] <= high_end) &
+        (df['low_time'] >= low_start) &
+        (df['low_time'] <= low_end) &
+        (df['observation_time'] == selected_obs_time)
+    ].copy()
     
-    # Display active filters
-    active_filters = []
+    st.sidebar.markdown("---")
+    st.sidebar.metric("Filtered Records", len(filtered_df))
+    st.sidebar.metric("Total Trading Days", filtered_df['date'].nunique())
     
-    # High filters display
-    if high_use_custom and high_filters:
-        if isinstance(high_filters[0], tuple):
-            start, end = high_filters[0]
-            active_filters.append(f"High: Custom ({start.strftime('%H:%M')}-{end.strftime('%H:%M')})")
-    elif high_filters != ['All'] and high_selections != high_cluster_options:
-        active_filters.append(f"High: {', '.join(high_filters)}")
-    
-    # Low filters display
-    if low_use_custom and low_filters:
-        if isinstance(low_filters[0], tuple):
-            start, end = low_filters[0]
-            active_filters.append(f"Low: Custom ({start.strftime('%H:%M')}-{end.strftime('%H:%M')})")
-    elif low_filters != ['All'] and low_selections != low_cluster_options:
-        active_filters.append(f"Low: {', '.join(low_filters)}")
-    
-    # EXT filters display
-    if rdrt_ext_filter:
-        active_filters.append(f"RDRT_EXT: {rdrt_ext_filter}")
-    if rdrb_ext_filter:
-        active_filters.append(f"RDRB_EXT: {rdrb_ext_filter}")
-    
-    if active_filters:
-        st.info(f"🔍 Active Filters: {' | '.join(active_filters)} | Showing {len(filtered_df)} of {len(df)} days")
+    if len(filtered_df) == 0:
+        st.warning("⚠️ No data matches your filter criteria. Please adjust the time ranges.")
     else:
-        st.info(f"📊 Showing all data: {len(filtered_df)} days")
-    
-    # Main content
-    st.markdown("---")
-    
-    # Display statistics
-    display_cluster_statistics(filtered_df)
-    
-    st.markdown("---")
-    
-    # Display EXT statistics
-    display_ext_statistics(filtered_df)
-    
-    st.markdown("---")
-    
-    # Cut-off Time Analysis
-    st.subheader("🎯 Cut-off Time Analysis")
-    st.markdown("*Analyze how often highs/lows from specific time clusters hold until session end (15:55)*")
-    
-    # Load candle data
-    candle_df = load_candle_data()
-    
-    if candle_df is not None:
-        col1, col2 = st.columns(2)
+        # Calculate statistics
+        total_days = len(filtered_df)
+        high_holds = (~filtered_df['high_broken']).sum()
+        high_breaks = filtered_df['high_broken'].sum()
+        low_holds = (~filtered_df['low_broken']).sum()
+        low_breaks = filtered_df['low_broken'].sum()
+        
+        high_hold_pct = (high_holds / total_days) * 100
+        high_break_pct = (high_breaks / total_days) * 100
+        low_hold_pct = (low_holds / total_days) * 100
+        low_break_pct = (low_breaks / total_days) * 100
+        
+        # Main metrics
+        st.header("📈 Key Statistics")
+        
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.markdown("**Select Cut-off Time:**")
-            st.markdown("*The time at which you check if extremes will hold*")
-            cutoff_time = st.time_input(
-                "Cut-off time",
-                value=time(9, 25, 0),
-                step=300,  # 5-minute increments
-                key='cutoff_time'
+            st.metric(
+                "High Hold %",
+                f"{high_hold_pct:.1f}%",
+                delta=f"{high_holds} days",
+                delta_color="normal"
             )
         
         with col2:
-            st.markdown("**Filter by Cluster (Optional):**")
-            st.markdown("*Analyze only highs/lows from specific time clusters*")
-            cluster_filter_options = ['All Clusters', 'ODRS', 'RDRT', 'RDRB', 'RDRS']
-            cluster_filter_selection = st.selectbox(
-                "Cluster filter",
-                options=cluster_filter_options,
-                index=0,
-                key='cluster_filter'
+            st.metric(
+                "High Break %",
+                f"{high_break_pct:.1f}%",
+                delta=f"{high_breaks} days",
+                delta_color="inverse"
             )
-            cluster_filter = None if cluster_filter_selection == 'All Clusters' else cluster_filter_selection
         
-        # Run analysis
-        if st.button("🔍 Analyze Cut-off Time", type="primary"):
-            with st.spinner("Analyzing..."):
-                stats = analyze_cutoff_by_cluster(candle_df, filtered_df, cutoff_time, cluster_filter)
+        with col3:
+            st.metric(
+                "Low Hold %",
+                f"{low_hold_pct:.1f}%",
+                delta=f"{low_holds} days",
+                delta_color="normal"
+            )
+        
+        with col4:
+            st.metric(
+                "Low Break %",
+                f"{low_break_pct:.1f}%",
+                delta=f"{low_breaks} days",
+                delta_color="inverse"
+            )
+        
+        # Break sequence analysis
+        if 'high_break_time' in filtered_df.columns and 'low_break_time' in filtered_df.columns:
+            st.markdown("---")
+            st.header("⚡ Break Sequence Analysis")
+            st.markdown("**Which level breaks first when both break?**")
+            
+            # Helper function to convert time to comparable format
+            def time_to_minutes_safe(t):
+                if pd.isna(t) or t is None:
+                    return None
+                return t.hour * 60 + t.minute
+            
+            # Calculate break sequences
+            filtered_df['high_break_minutes'] = filtered_df['high_break_time'].apply(time_to_minutes_safe)
+            filtered_df['low_break_minutes'] = filtered_df['low_break_time'].apply(time_to_minutes_safe)
+            
+            # Categorize each day
+            def categorize_break(row):
+                high_broke = row['high_broken']
+                low_broke = row['low_broken']
+                high_time = row['high_break_minutes']
+                low_time = row['low_break_minutes']
                 
-                if stats:
-                    st.success(f"✓ Analysis complete for cut-off time: {cutoff_time.strftime('%H:%M')}")
+                if not high_broke and not low_broke:
+                    return 'Both Hold'
+                elif high_broke and not low_broke:
+                    return 'Only High Breaks'
+                elif low_broke and not high_broke:
+                    return 'Only Low Breaks'
+                else:  # Both broke
+                    if high_time is not None and low_time is not None:
+                        if high_time < low_time:
+                            return 'High Breaks First'
+                        elif low_time < high_time:
+                            return 'Low Breaks First'
+                        else:
+                            return 'Both Break Same Time'
+                    return 'Both Break (Unknown Order)'
+            
+            filtered_df['break_sequence'] = filtered_df.apply(categorize_break, axis=1)
+            
+            # Calculate statistics
+            sequence_counts = filtered_df['break_sequence'].value_counts()
+            sequence_pcts = (sequence_counts / len(filtered_df) * 100).round(2)
+            
+            # Display metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                count = sequence_counts.get('Only High Breaks', 0)
+                pct = sequence_pcts.get('Only High Breaks', 0.0)
+                st.metric(
+                    "🟠 Only High Breaks",
+                    f"{pct:.1f}%",
+                    delta=f"{count} days"
+                )
+            
+            with col2:
+                count = sequence_counts.get('Only Low Breaks', 0)
+                pct = sequence_pcts.get('Only Low Breaks', 0.0)
+                st.metric(
+                    "🟣 Only Low Breaks",
+                    f"{pct:.1f}%",
+                    delta=f"{count} days"
+                )
+            
+            with col3:
+                # Calculate "Both Break %" - sum of all scenarios where both broke
+                both_break_categories = ['High Breaks First', 'Low Breaks First', 'Both Break Same Time', 'Both Break (Unknown Order)']
+                both_break_count = sum(sequence_counts.get(cat, 0) for cat in both_break_categories)
+                both_break_pct = (both_break_count / len(filtered_df) * 100) if len(filtered_df) > 0 else 0.0
+                st.metric(
+                    "⚫ Both Break",
+                    f"{both_break_pct:.1f}%",
+                    delta=f"{both_break_count} days"
+                )
+            
+            with col4:
+                count = sequence_counts.get('Both Hold', 0)
+                pct = sequence_pcts.get('Both Hold', 0.0)
+                st.metric(
+                    "🟢 Both Hold",
+                    f"{pct:.1f}%",
+                    delta=f"{count} days"
+                )
+            
+            st.markdown("---")
+            
+            # Bar chart showing which level breaks first (including single breaks)
+            st.markdown("### 🔄 Which Level Breaks First?")
+            st.markdown("**Overall probability of which extremity gets taken out first**")
+            
+            # New logic: Include ALL days where at least one level breaks
+            # Categories:
+            # - High Breaks First: high breaks before low (whether or not low breaks later)
+            # - Low Breaks First: low breaks before high (whether or not high breaks later)
+            # - Both Hold: neither breaks
+            # - Both Break Same Time: both break in same candle (rare)
+            
+            def categorize_first_break(row):
+                high_broke = row['high_broken']
+                low_broke = row['low_broken']
+                high_time = row['high_break_minutes']
+                low_time = row['low_break_minutes']
+                
+                if not high_broke and not low_broke:
+                    return 'Both Hold'
+                elif high_broke and not low_broke:
+                    return 'High Breaks First'
+                elif low_broke and not high_broke:
+                    return 'Low Breaks First'
+                else:  # Both broke - compare times
+                    if high_time is not None and low_time is not None:
+                        if high_time < low_time:
+                            return 'High Breaks First'
+                        elif low_time < high_time:
+                            return 'Low Breaks First'
+                        else:
+                            return 'Both Break Same Time'
+                    return 'Both Break (Unknown Order)'
+            
+            filtered_df['first_break'] = filtered_df.apply(categorize_first_break, axis=1)
+            
+            # Calculate statistics
+            first_break_counts = filtered_df['first_break'].value_counts()
+            first_break_pcts = (first_break_counts / len(filtered_df) * 100).round(2)
+            
+            # Filter to show only the breaking scenarios (exclude Both Hold for the chart)
+            break_data = filtered_df[filtered_df['first_break'] != 'Both Hold']
+            
+            if len(break_data) > 0:
+                break_counts = break_data['first_break'].value_counts()
+                break_pcts = (break_counts / len(break_data) * 100).round(2)
+                
+                fig_first_break = go.Figure()
+                
+                # Define colors for each category
+                colors_map = {
+                    'High Breaks First': '#e74c3c',
+                    'Low Breaks First': '#3498db',
+                    'Both Break Same Time': '#95a5a6'
+                }
+                
+                bar_colors = [colors_map.get(cat, '#95a5a6') for cat in break_counts.index]
+                
+                fig_first_break.add_trace(go.Bar(
+                    x=break_counts.index,
+                    y=break_pcts.values,
+                    text=[f"{pct:.1f}%<br>({count} days)" for pct, count in zip(break_pcts.values, break_counts.values)],
+                    textposition='outside',
+                    marker=dict(
+                        color=bar_colors,
+                        line=dict(color='rgba(0,0,0,0.3)', width=2)
+                    ),
+                    hovertemplate='<b>%{x}</b><br>Percentage: %{y:.1f}%<br><extra></extra>'
+                ))
+                
+                fig_first_break.update_layout(
+                    title=f"Which Level Breaks First? ({len(break_data)} days with at least one break)",
+                    yaxis_title="Percentage of Breaking Days",
+                    xaxis_title="First Break",
+                    height=450,
+                    yaxis_range=[0, max(break_pcts.values) * 1.2] if len(break_pcts) > 0 else [0, 100],
+                    showlegend=False
+                )
+                
+                st.plotly_chart(fig_first_break, use_container_width=True)
+                
+                # Add summary statistics
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.metric(
+                        "🔴 High Breaks First",
+                        f"{break_pcts.get('High Breaks First', 0):.1f}%",
+                        delta=f"{break_counts.get('High Breaks First', 0)} days"
+                    )
+                
+                with col2:
+                    st.metric(
+                        "🔵 Low Breaks First",
+                        f"{break_pcts.get('Low Breaks First', 0):.1f}%",
+                        delta=f"{break_counts.get('Low Breaks First', 0)} days"
+                    )
+                
+                # Add insight
+                if 'High Breaks First' in break_pcts.index and 'Low Breaks First' in break_pcts.index:
+                    high_first_pct = break_pcts['High Breaks First']
+                    low_first_pct = break_pcts['Low Breaks First']
                     
-                    # Display results
-                    st.markdown(f"### Results: Probability Highs/Lows Hold from Cut-off Time ({cutoff_time.strftime('%H:%M')}) to 15:55")
+                    if high_first_pct > low_first_pct:
+                        leader = "High"
+                        leader_pct = high_first_pct
+                        diff = high_first_pct - low_first_pct
+                    else:
+                        leader = "Low"
+                        leader_pct = low_first_pct
+                        diff = low_first_pct - high_first_pct
                     
-                    if cluster_filter:
-                        st.info(f"Filtered to extremes occurring in: **{cluster_filter}**")
+                    st.info(f"💡 **Insight:** When a level breaks, the **{leader}** breaks first **{leader_pct:.1f}%** of the time (difference of {diff:.1f}%). This tells you which extremity is more likely to be taken out first, regardless of whether it becomes a double breakout day.")
+            else:
+                st.info("No breaks in the filtered data.")
+            
+            # Timeline analysis - when do breaks typically happen
+            st.subheader("⏰ Break Timing Distribution")
+            
+            # Add bucket size selector
+            bucket_size = st.selectbox(
+                "Time Bucket Size (minutes)",
+                options=[5, 15, 30],
+                index=1,  # Default to 15 minutes
+                help="Group break times into buckets for easier visualization"
+            )
+            
+            def bucket_minutes(minutes, bucket_size):
+                """Bucket minutes into specified intervals"""
+                if pd.isna(minutes) or minutes is None:
+                    return None
+                return (minutes // bucket_size) * bucket_size
+            
+            def minutes_to_time_label(minutes):
+                """Convert minutes to time label"""
+                hours = int(minutes // 60)
+                mins = int(minutes % 60)
+                return f"{hours:02d}:{mins:02d}"
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                high_break_times = filtered_df[filtered_df['high_broken'] & filtered_df['high_break_minutes'].notna()].copy()
+                if len(high_break_times) > 0:
+                    # Create bucketed data
+                    high_break_times['bucketed_minutes'] = high_break_times['high_break_minutes'].apply(
+                        lambda x: bucket_minutes(x, bucket_size)
+                    )
                     
-                    # Create DataFrame for display
-                    results_data = []
-                    for cluster in ['ODRS', 'RDRT', 'RDRB', 'RDRS']:
-                        cluster_stats = stats[cluster]
-                        results_data.append({
-                            'Cluster': cluster,
-                            'Time Range': f"{CLUSTERS[cluster][0].strftime('%H:%M')}-{CLUSTERS[cluster][1].strftime('%H:%M')}",
-                            'High Total': cluster_stats['high_total'],
-                            'High Held': cluster_stats['high_held_count'],
-                            'High Hold %': f"{cluster_stats['high_held_pct']:.1f}%",
-                            'Low Total': cluster_stats['low_total'],
-                            'Low Held': cluster_stats['low_held_count'],
-                            'Low Hold %': f"{cluster_stats['low_held_pct']:.1f}%"
-                        })
+                    # Count occurrences per bucket
+                    bucket_counts = high_break_times['bucketed_minutes'].value_counts().sort_index()
                     
-                    results_df = pd.DataFrame(results_data)
+                    # Create labels for x-axis
+                    bucket_labels = [minutes_to_time_label(m) for m in bucket_counts.index]
                     
-                    # Display in two columns
-                    col1, col2 = st.columns(2)
+                    # Create detailed hover text
+                    hover_text = [
+                        f"Time: {minutes_to_time_label(m)} - {minutes_to_time_label(m + bucket_size)}<br>Breaks: {count}<br>Bucket: {bucket_size} min"
+                        for m, count in zip(bucket_counts.index, bucket_counts.values)
+                    ]
                     
-                    with col1:
-                        st.markdown("#### 📈 High Hold Probabilities")
-                        high_display = results_df[['Cluster', 'Time Range', 'High Total', 'High Held', 'High Hold %']].copy()
-                        
-                        # Color code the percentages
-                        st.dataframe(
-                            high_display.style.applymap(
-                                lambda x: f'background-color: {get_percentage_color(float(x.rstrip("%")))}; color: {get_text_color_for_background(float(x.rstrip("%")))}' 
-                                if isinstance(x, str) and '%' in x else '',
-                                subset=['High Hold %']
-                            ),
-                            use_container_width=True,
-                            hide_index=True
-                        )
-                        
-                        # Bar chart for highs
-                        fig_high = go.Figure()
-                        fig_high.add_trace(go.Bar(
-                            x=results_df['Cluster'],
-                            y=[float(x.rstrip('%')) for x in results_df['High Hold %']],
-                            marker_color=[CLUSTER_COLORS[c] for c in results_df['Cluster']],
-                            text=results_df['High Hold %'],
-                            textposition='outside',
-                            hovertemplate='<b>%{x}</b><br>Hold Rate: %{y:.1f}%<br>Total: ' + 
-                                         results_df['High Total'].astype(str) + '<extra></extra>'
-                        ))
-                        fig_high.update_layout(
-                            title='High Hold Rate by Cluster',
-                            xaxis_title='Cluster',
-                            yaxis_title='Hold Probability (%)',
-                            yaxis_range=[0, 100],
-                            height=400
-                        )
-                        st.plotly_chart(fig_high, use_container_width=True)
+                    fig_high_timing = go.Figure()
                     
-                    with col2:
-                        st.markdown("#### 📉 Low Hold Probabilities")
-                        low_display = results_df[['Cluster', 'Time Range', 'Low Total', 'Low Held', 'Low Hold %']].copy()
-                        
-                        # Color code the percentages
-                        st.dataframe(
-                            low_display.style.applymap(
-                                lambda x: f'background-color: {get_percentage_color(float(x.rstrip("%")))}; color: {get_text_color_for_background(float(x.rstrip("%")))}' 
-                                if isinstance(x, str) and '%' in x else '',
-                                subset=['Low Hold %']
-                            ),
-                            use_container_width=True,
-                            hide_index=True
-                        )
-                        
-                        # Bar chart for lows
-                        fig_low = go.Figure()
-                        fig_low.add_trace(go.Bar(
-                            x=results_df['Cluster'],
-                            y=[float(x.rstrip('%')) for x in results_df['Low Hold %']],
-                            marker_color=[CLUSTER_COLORS[c] for c in results_df['Cluster']],
-                            text=results_df['Low Hold %'],
-                            textposition='outside',
-                            hovertemplate='<b>%{x}</b><br>Hold Rate: %{y:.1f}%<br>Total: ' + 
-                                         results_df['Low Total'].astype(str) + '<extra></extra>'
-                        ))
-                        fig_low.update_layout(
-                            title='Low Hold Rate by Cluster',
-                            xaxis_title='Cluster',
-                            yaxis_title='Hold Probability (%)',
-                            yaxis_range=[0, 100],
-                            height=400
-                        )
-                        st.plotly_chart(fig_low, use_container_width=True)
+                    fig_high_timing.add_trace(go.Bar(
+                        x=bucket_labels,
+                        y=bucket_counts.values,
+                        marker=dict(
+                            color='#e74c3c',
+                            line=dict(color='#c0392b', width=2)  # Border for bars
+                        ),
+                        hovertext=hover_text,
+                        hoverinfo='text',
+                        name='High Breaks'
+                    ))
                     
-                    # Insights
-                    st.markdown("#### 💡 Insights")
+                    fig_high_timing.update_layout(
+                        title=f"High Break Time Distribution ({bucket_size}-min buckets)",
+                        xaxis_title="Time Range",
+                        yaxis_title="Number of Breaks",
+                        height=350,
+                        xaxis=dict(
+                            tickangle=-45,
+                            tickmode='linear'
+                        ),
+                        showlegend=False
+                    )
                     
-                    # Find best/worst hold rates
-                    high_hold_pcts = [stats[c]['high_held_pct'] for c in ['ODRS', 'RDRT', 'RDRB', 'RDRS']]
-                    low_hold_pcts = [stats[c]['low_held_pct'] for c in ['ODRS', 'RDRT', 'RDRB', 'RDRS']]
-                    clusters_list = ['ODRS', 'RDRT', 'RDRB', 'RDRS']
-                    
-                    best_high_idx = high_hold_pcts.index(max(high_hold_pcts))
-                    best_low_idx = low_hold_pcts.index(max(low_hold_pcts))
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric(
-                            "Best High Hold Rate",
-                            f"{clusters_list[best_high_idx]}",
-                            f"{high_hold_pcts[best_high_idx]:.1f}%"
-                        )
-                    with col2:
-                        st.metric(
-                            "Best Low Hold Rate",
-                            f"{clusters_list[best_low_idx]}",
-                            f"{low_hold_pcts[best_low_idx]:.1f}%"
-                        )
+                    st.plotly_chart(fig_high_timing, use_container_width=True)
                 else:
-                    st.warning("No data available for analysis with current filters and cut-off time.")
-    else:
-        st.warning("⚠️ candle_data.csv not found. Cut-off analysis requires the raw candle data file.")
-        st.info("To enable cut-off analysis, place candle_data.csv in the same directory as this script.")
-    
-    st.markdown("---")
-    
-    # Time distribution chart
-    st.subheader("⏰ Time Distribution Analysis")
-    
-    # Bucket size selector
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        bucket_size = st.selectbox(
-            "Time bucket size (minutes)",
-            options=[5, 15, 30],
-            index=0
+                    st.info("No high breaks in filtered data.")
+            
+            with col2:
+                low_break_times = filtered_df[filtered_df['low_broken'] & filtered_df['low_break_minutes'].notna()].copy()
+                if len(low_break_times) > 0:
+                    # Create bucketed data
+                    low_break_times['bucketed_minutes'] = low_break_times['low_break_minutes'].apply(
+                        lambda x: bucket_minutes(x, bucket_size)
+                    )
+                    
+                    # Count occurrences per bucket
+                    bucket_counts = low_break_times['bucketed_minutes'].value_counts().sort_index()
+                    
+                    # Create labels for x-axis
+                    bucket_labels = [minutes_to_time_label(m) for m in bucket_counts.index]
+                    
+                    # Create detailed hover text
+                    hover_text = [
+                        f"Time: {minutes_to_time_label(m)} - {minutes_to_time_label(m + bucket_size)}<br>Breaks: {count}<br>Bucket: {bucket_size} min"
+                        for m, count in zip(bucket_counts.index, bucket_counts.values)
+                    ]
+                    
+                    fig_low_timing = go.Figure()
+                    
+                    fig_low_timing.add_trace(go.Bar(
+                        x=bucket_labels,
+                        y=bucket_counts.values,
+                        marker=dict(
+                            color='#3498db',
+                            line=dict(color='#2980b9', width=2)  # Border for bars
+                        ),
+                        hovertext=hover_text,
+                        hoverinfo='text',
+                        name='Low Breaks'
+                    ))
+                    
+                    fig_low_timing.update_layout(
+                        title=f"Low Break Time Distribution ({bucket_size}-min buckets)",
+                        xaxis_title="Time Range",
+                        yaxis_title="Number of Breaks",
+                        height=350,
+                        xaxis=dict(
+                            tickangle=-45,
+                            tickmode='linear'
+                        ),
+                        showlegend=False
+                    )
+                    
+                    st.plotly_chart(fig_low_timing, use_container_width=True)
+                else:
+                    st.info("No low breaks in filtered data.")
+        
+        st.markdown("---")
+        
+        # Visualization section
+        st.header("📊 Visualizations")
+        
+        st.subheader("Hold Probability Over Time")
+        
+        # Calculate probabilities across all observation times for line chart
+        line_data = []
+        for obs_time in available_obs_times:
+            temp_df = df[
+                (df['high_time'] >= high_start) &
+                (df['high_time'] <= high_end) &
+                (df['low_time'] >= low_start) &
+                (df['low_time'] <= low_end) &
+                (df['observation_time'] == obs_time)
+            ]
+            
+            if len(temp_df) > 0:
+                line_data.append({
+                    'observation_time': obs_time,
+                    'high_hold_pct': (~temp_df['high_broken']).sum() / len(temp_df) * 100,
+                    'low_hold_pct': (~temp_df['low_broken']).sum() / len(temp_df) * 100,
+                    'days': len(temp_df)
+                })
+        
+        line_df = pd.DataFrame(line_data)
+        line_df['time_str'] = line_df['observation_time'].apply(lambda x: x.strftime('%H:%M'))
+        
+        # Create line chart
+        fig_line = go.Figure()
+        
+        fig_line.add_trace(go.Scatter(
+            x=line_df['time_str'],
+            y=line_df['high_hold_pct'],
+            mode='lines+markers',
+            name='High Hold %',
+            line=dict(color='#2ecc71', width=3),
+            marker=dict(size=8)
+        ))
+        
+        fig_line.add_trace(go.Scatter(
+            x=line_df['time_str'],
+            y=line_df['low_hold_pct'],
+            mode='lines+markers',
+            name='Low Hold %',
+            line=dict(color='#e74c3c', width=3),
+            marker=dict(size=8)
+        ))
+        
+        # Highlight selected observation time
+        selected_point = line_df[line_df['observation_time'] == selected_obs_time]
+        if not selected_point.empty:
+            fig_line.add_trace(go.Scatter(
+                x=[selected_point.iloc[0]['time_str']],
+                y=[selected_point.iloc[0]['high_hold_pct']],
+                mode='markers',
+                name='Selected (High)',
+                marker=dict(size=15, color='#2ecc71', symbol='star'),
+                showlegend=False
+            ))
+            
+            fig_line.add_trace(go.Scatter(
+                x=[selected_point.iloc[0]['time_str']],
+                y=[selected_point.iloc[0]['low_hold_pct']],
+                mode='markers',
+                name='Selected (Low)',
+                marker=dict(size=15, color='#e74c3c', symbol='star'),
+                showlegend=False
+            ))
+        
+        fig_line.update_layout(
+            title="Probability of Levels Holding Throughout the Day",
+            xaxis_title="Observation Time",
+            yaxis_title="Hold Probability (%)",
+            yaxis_range=[0, 100],
+            hovermode='x unified',
+            height=500,
+            template="plotly_white"
         )
-    
-    # Create and display chart
-    fig = create_time_distribution_chart(filtered_df, bucket_size)
-    if fig:
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("No data to display in chart.")
-    
-    # Data preview
-    st.markdown("---")
-    st.subheader("📋 Filtered Data Preview")
-    
-    if not filtered_df.empty:
-        # Format the dataframe for display
-        display_df = filtered_df[[
-            'date', 'highest_high', 'high_time', 'lowest_low', 'low_time',
-            'RDRT_EXT_STATUS', 'RDRT_EXT_TIME', 'RDRB_EXT_STATUS', 'RDRB_EXT_TIME'
-        ]].copy()
         
-        # Format date
-        display_df['date'] = display_df['date'].dt.strftime('%Y-%m-%d')
+        st.plotly_chart(fig_line, use_container_width=True)
         
-        st.dataframe(display_df, use_container_width=True, height=400)
+        st.info("💡 **Insight:** Later observation times typically show higher hold probabilities since there's less time remaining for levels to break.")
         
-        # Download button
-        csv = filtered_df.to_csv(index=False)
+        st.markdown("---")
+        # Data table
+        st.markdown("---")
+        st.markdown("---")
+        st.header("📋 Filtered Data Table")
+        
+        # Build display columns based on what's available
+        display_cols = ['date', 'high_value', 'high_time', 'high_broken']
+        if 'high_break_time' in filtered_df.columns:
+            display_cols.append('high_break_time')
+        display_cols.extend(['low_value', 'low_time', 'low_broken'])
+        if 'low_break_time' in filtered_df.columns:
+            display_cols.append('low_break_time')
+        if 'break_sequence' in filtered_df.columns:
+            display_cols.append('break_sequence')
+        
+        display_df = filtered_df[display_cols].copy()
+        display_df['date'] = display_df['date'].dt.date
+        display_df = display_df.sort_values('date', ascending=False)
+        
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            height=400
+        )
+        
+        # Download filtered data
+        csv = display_df.to_csv(index=False)
         st.download_button(
             label="📥 Download Filtered Data as CSV",
             data=csv,
-            file_name=f"filtered_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            file_name=f"filtered_analysis_{selected_obs_time_str.replace(':', '')}.csv",
             mime="text/csv"
         )
-    else:
-        st.warning("No data matches the current filters.")
+
+else:
+    # Instructions when no file is uploaded
+    st.info("👈 Please upload your `candle_data_detailed_breakdown.csv` file using the sidebar.")
     
-    # Footer
-    st.markdown("---")
     st.markdown("""
-    **Time Clusters:**
-    - **ODRS** (Overnight/Pre-Market): 04:00 - 08:25
-    - **RDRT** (Regular Day Range Top): 08:30 - 09:25
-    - **RDRB** (Regular Day Range Bottom): 09:30 - 10:25
-    - **RDRS** (Regular Day Range Session): 10:30 - 15:55
+    ### How to use this app:
     
-    **Color Guide:**
-    - **Cluster Colors:** ODRS (Blue), RDRT (Red), RDRB (Orange), RDRS (Purple)
-    - **EXT Status:** High (Red), Low (Blue), N/A (Gray)
-    - **Percentage Heat:** 🟢 Green (<10%) → 🟡 Yellow (10-30%) → 🟠 Orange (30-40%) → 🔴 Red (>40%)
+    1. **Upload your data**: Use the file uploader in the sidebar to upload `candle_data_detailed_breakdown.csv`
+    
+    2. **Set time filters**:
+       - **High Formation Range**: Time window when you want to consider highs (e.g., 4:00-4:20)
+       - **Low Formation Range**: Time window when you want to consider lows (e.g., 5:15-7:15)
+       - **Observation Time**: When to check if levels hold (default: 16:00)
+    
+    3. **Explore visualizations**:
+       - **Line Chart**: See how hold probabilities change throughout the day
+       - **Heatmap**: Analyze patterns across dates and weekdays
+       - **Scatter Plot**: Visualize high/low values vs their formation times
+       - **Bar Charts**: Compare hold vs break statistics
+    
+    4. **Download results**: Export filtered data for further analysis
+    
+    ### Example Use Case:
+    *"I want to know: if a high forms between 4:00-4:20 and a low forms between 5:15-7:15, 
+    what's the probability they'll both hold until 16:00 (end of day)?"*
+    
+    This app will show you exactly that, with detailed visualizations! 📊
     """)
-
-
-if __name__ == '__main__':
-    main()
