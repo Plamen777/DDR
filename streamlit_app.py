@@ -93,53 +93,78 @@ time_interval_strings = [t.strftime('%H:%M') for t in time_intervals]
 if df is not None:
     
     # Quick Time Window Filter
-    st.sidebar.subheader("⚡ Quick Time Window (±30 min)")
-    use_quick_filter = st.sidebar.checkbox(
-        "Enable Quick Filter",
-        value=False,
-        help="Automatically set High and Low ranges to ±30 minutes around center times"
+    st.sidebar.subheader("⚡ Quick Time Window")
+    
+    # Adjustable window size
+    window_minutes = st.sidebar.number_input(
+        "Window Size (±minutes)",
+        min_value=5,
+        max_value=120,
+        value=30,
+        step=5,
+        help="Set the time window before and after the center time (in minutes)"
     )
     
-    if use_quick_filter:
-        col1, col2 = st.sidebar.columns(2)
-        
-        with col1:
-            high_center_time_str = st.sidebar.selectbox(
-                "High Center",
-                options=time_interval_strings,
-                index=time_interval_strings.index('07:10') if '07:10' in time_interval_strings else 36,
-                help="High range will be ±30 min around this time"
-            )
-        
-        with col2:
-            low_center_time_str = st.sidebar.selectbox(
-                "Low Center",
-                options=time_interval_strings,
-                index=time_interval_strings.index('07:10') if '07:10' in time_interval_strings else 36,
-                help="Low range will be ±30 min around this time"
-            )
+    # Separate toggles for High and Low
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        use_quick_filter_high = st.sidebar.checkbox(
+            "Enable High",
+            value=False,
+            help=f"Set High range to ±{window_minutes} min around center time"
+        )
+    with col2:
+        use_quick_filter_low = st.sidebar.checkbox(
+            "Enable Low",
+            value=False,
+            help=f"Set Low range to ±{window_minutes} min around center time"
+        )
+    
+    # High center time (only show if enabled)
+    if use_quick_filter_high:
+        high_center_time_str = st.sidebar.selectbox(
+            "High Center",
+            options=time_interval_strings,
+            index=time_interval_strings.index('07:10') if '07:10' in time_interval_strings else 36,
+            help=f"High range will be ±{window_minutes} min around this time"
+        )
         
         # Calculate High range
         high_center_time = datetime.strptime(high_center_time_str, '%H:%M').time()
         high_center_minutes = high_center_time.hour * 60 + high_center_time.minute
-        high_start_minutes = max(4 * 60, high_center_minutes - 30)
-        high_end_minutes = min(15 * 60 + 55, high_center_minutes + 30)
+        high_start_minutes = max(4 * 60, high_center_minutes - window_minutes)
+        high_end_minutes = min(15 * 60 + 55, high_center_minutes + window_minutes)
         high_start_minutes = (high_start_minutes // 5) * 5
         high_end_minutes = (high_end_minutes // 5) * 5
         high_start = time(high_start_minutes // 60, high_start_minutes % 60)
         high_end = time(high_end_minutes // 60, high_end_minutes % 60)
         
+        st.sidebar.success(f"🟢 High: {high_start.strftime('%H:%M')} - {high_end.strftime('%H:%M')}")
+    
+    # Low center time (only show if enabled)
+    if use_quick_filter_low:
+        low_center_time_str = st.sidebar.selectbox(
+            "Low Center",
+            options=time_interval_strings,
+            index=time_interval_strings.index('07:10') if '07:10' in time_interval_strings else 36,
+            help=f"Low range will be ±{window_minutes} min around this time"
+        )
+        
         # Calculate Low range
         low_center_time = datetime.strptime(low_center_time_str, '%H:%M').time()
         low_center_minutes = low_center_time.hour * 60 + low_center_time.minute
-        low_start_minutes = max(4 * 60, low_center_minutes - 30)
-        low_end_minutes = min(15 * 60 + 55, low_center_minutes + 30)
+        low_start_minutes = max(4 * 60, low_center_minutes - window_minutes)
+        low_end_minutes = min(15 * 60 + 55, low_center_minutes + window_minutes)
         low_start_minutes = (low_start_minutes // 5) * 5
         low_end_minutes = (low_end_minutes // 5) * 5
         low_start = time(low_start_minutes // 60, low_start_minutes % 60)
         low_end = time(low_end_minutes // 60, low_end_minutes % 60)
         
-        st.sidebar.info(f"📍 High: {high_start.strftime('%H:%M')} - {high_end.strftime('%H:%M')}\n\n📍 Low: {low_start.strftime('%H:%M')} - {low_end.strftime('%H:%M')}")
+        st.sidebar.success(f"🔴 Low: {low_start.strftime('%H:%M')} - {low_end.strftime('%H:%M')}")
+    
+    # Show separator if any quick filter is enabled
+    if use_quick_filter_high or use_quick_filter_low:
+        st.sidebar.markdown("---")
     else:
         # Manual time range filters (original behavior)
         st.sidebar.markdown("---")
@@ -147,7 +172,7 @@ if df is not None:
     # High time range filter
     st.sidebar.subheader("⬆️ High Formation Time Range")
     
-    if not use_quick_filter:
+    if not use_quick_filter_high:
         high_start_str = st.sidebar.selectbox(
             "High Start Time",
             options=time_interval_strings,
@@ -170,7 +195,7 @@ if df is not None:
     # Low time range filter
     st.sidebar.subheader("⬇️ Low Formation Time Range")
     
-    if not use_quick_filter:
+    if not use_quick_filter_low:
         low_start_str = st.sidebar.selectbox(
             "Low Start Time",
             options=time_interval_strings,
@@ -725,6 +750,210 @@ if df is not None:
         st.plotly_chart(fig_line, use_container_width=True)
         
         st.info("💡 **Insight:** Later observation times typically show higher hold probabilities since there's less time remaining for levels to break.")
+        
+        st.markdown("---")
+        
+        # High/Low Time Distribution Clustering
+        st.header("📍 High/Low Time Distribution")
+        st.markdown("**Where do Highs and Lows typically form during the day?**")
+        st.markdown("*Using 16:00 observation time for general distribution pattern*")
+        
+        # Get data for 16:00 observation time
+        obs_16 = time(16, 0)
+        distribution_df = df[
+            (df['high_time'] >= high_start) &
+            (df['high_time'] <= high_end) &
+            (df['low_time'] >= low_start) &
+            (df['low_time'] <= low_end) &
+            (df['observation_time'] == obs_16)
+        ].copy()
+        
+        if len(distribution_df) > 0:
+            # Bucket size selector
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                bucket_type = st.selectbox(
+                    "Bucket Type",
+                    options=["5 min", "15 min", "30 min", "1h", "Session"],
+                    index=2,  # Default to 30 min
+                    help="Group high/low times into buckets"
+                )
+            
+            # Define session buckets (ordered)
+            from collections import OrderedDict
+            session_buckets = OrderedDict([
+                ('ODRS (4:00-8:25)', (time(4, 0), time(8, 25))),
+                ('RDRT (8:30-9:25)', (time(8, 30), time(9, 25))),
+                ('RDRB (9:30-10:25)', (time(9, 30), time(10, 25))),
+                ('RDRS (10:30-15:55)', (time(10, 30), time(15, 55)))
+            ])
+            
+            def time_to_minutes(t):
+                return t.hour * 60 + t.minute
+            
+            def bucket_time(t, bucket_type):
+                """Bucket a time based on bucket type"""
+                if pd.isna(t) or t is None:
+                    return None
+                
+                minutes = time_to_minutes(t)
+                
+                if bucket_type == "5 min":
+                    bucket_min = (minutes // 5) * 5
+                    return f"{bucket_min // 60:02d}:{bucket_min % 60:02d}"
+                elif bucket_type == "15 min":
+                    bucket_min = (minutes // 15) * 15
+                    return f"{bucket_min // 60:02d}:{bucket_min % 60:02d}"
+                elif bucket_type == "30 min":
+                    bucket_min = (minutes // 30) * 30
+                    return f"{bucket_min // 60:02d}:{bucket_min % 60:02d}"
+                elif bucket_type == "1h":
+                    bucket_min = (minutes // 60) * 60
+                    return f"{bucket_min // 60:02d}:{bucket_min % 60:02d}"
+                else:  # Session
+                    for session_name, (start, end) in session_buckets.items():
+                        if time_to_minutes(start) <= minutes <= time_to_minutes(end):
+                            return session_name
+                    return "Unknown"
+            
+            # Create bucketed data for High
+            distribution_df['high_bucket'] = distribution_df['high_time'].apply(lambda t: bucket_time(t, bucket_type))
+            
+            # For session buckets, ensure proper ordering
+            if bucket_type == "Session":
+                high_counts = distribution_df['high_bucket'].value_counts()
+                # Reindex with session order
+                session_order = list(session_buckets.keys())
+                high_counts = high_counts.reindex(session_order, fill_value=0)
+            else:
+                high_counts = distribution_df['high_bucket'].value_counts().sort_index()
+            
+            total_high = len(distribution_df)
+            high_pcts = (high_counts / total_high * 100).round(2)
+            
+            # Create bucketed data for Low
+            distribution_df['low_bucket'] = distribution_df['low_time'].apply(lambda t: bucket_time(t, bucket_type))
+            
+            # For session buckets, ensure proper ordering
+            if bucket_type == "Session":
+                low_counts = distribution_df['low_bucket'].value_counts()
+                # Reindex with session order
+                low_counts = low_counts.reindex(session_order, fill_value=0)
+            else:
+                low_counts = distribution_df['low_bucket'].value_counts().sort_index()
+            
+            total_low = len(distribution_df)
+            low_pcts = (low_counts / total_low * 100).round(2)
+            
+            # Create visualization
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown(f"**🟢 High Distribution** ({total_high} days)")
+                
+                # Create hover text
+                hover_text_high = [
+                    f"Time: {bucket}<br>Count: {count}<br>Percentage: {high_pcts[bucket]:.2f}%"
+                    for bucket, count in zip(high_counts.index, high_counts.values)
+                ]
+                
+                fig_high_dist = go.Figure()
+                fig_high_dist.add_trace(go.Bar(
+                    x=high_counts.index,
+                    y=high_counts.values,
+                    marker=dict(
+                        color='#2ecc71',
+                        line=dict(color='#27ae60', width=2)
+                    ),
+                    text=[f"{count}<br>({high_pcts[bucket]:.1f}%)" for bucket, count in zip(high_counts.index, high_counts.values)],
+                    textposition='outside',
+                    hovertext=hover_text_high,
+                    hoverinfo='text',
+                    name='High'
+                ))
+                
+                fig_high_dist.update_layout(
+                    title=f"High Formation Time Distribution",
+                    xaxis_title="Time Bucket",
+                    yaxis_title="Count",
+                    height=450,
+                    xaxis=dict(
+                        tickangle=-45 if bucket_type != "Session" else 0
+                    ),
+                    showlegend=False
+                )
+                
+                st.plotly_chart(fig_high_dist, use_container_width=True)
+                
+                # Show filtered range info
+                st.caption(f"📊 Filtered: High between {high_start.strftime('%H:%M')} - {high_end.strftime('%H:%M')}")
+            
+            with col2:
+                st.markdown(f"**🔴 Low Distribution** ({total_low} days)")
+                
+                # Create hover text
+                hover_text_low = [
+                    f"Time: {bucket}<br>Count: {count}<br>Percentage: {low_pcts[bucket]:.2f}%"
+                    for bucket, count in zip(low_counts.index, low_counts.values)
+                ]
+                
+                fig_low_dist = go.Figure()
+                fig_low_dist.add_trace(go.Bar(
+                    x=low_counts.index,
+                    y=low_counts.values,
+                    marker=dict(
+                        color='#e74c3c',
+                        line=dict(color='#c0392b', width=2)
+                    ),
+                    text=[f"{count}<br>({low_pcts[bucket]:.1f}%)" for bucket, count in zip(low_counts.index, low_counts.values)],
+                    textposition='outside',
+                    hovertext=hover_text_low,
+                    hoverinfo='text',
+                    name='Low'
+                ))
+                
+                fig_low_dist.update_layout(
+                    title=f"Low Formation Time Distribution",
+                    xaxis_title="Time Bucket",
+                    yaxis_title="Count",
+                    height=450,
+                    xaxis=dict(
+                        tickangle=-45 if bucket_type != "Session" else 0
+                    ),
+                    showlegend=False
+                )
+                
+                st.plotly_chart(fig_low_dist, use_container_width=True)
+                
+                # Show filtered range info
+                st.caption(f"📊 Filtered: Low between {low_start.strftime('%H:%M')} - {low_end.strftime('%H:%M')}")
+            
+            # Summary statistics table
+            st.markdown("### 📋 Distribution Summary")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**🟢 High Distribution Table**")
+                high_summary = pd.DataFrame({
+                    'Time Bucket': high_counts.index,
+                    'Count': high_counts.values,
+                    'Percentage': [f"{pct:.2f}%" for pct in high_pcts.values]
+                })
+                st.dataframe(high_summary, use_container_width=True, hide_index=True)
+            
+            with col2:
+                st.markdown("**🔴 Low Distribution Table**")
+                low_summary = pd.DataFrame({
+                    'Time Bucket': low_counts.index,
+                    'Count': low_counts.values,
+                    'Percentage': [f"{pct:.2f}%" for pct in low_pcts.values]
+                })
+                st.dataframe(low_summary, use_container_width=True, hide_index=True)
+            
+            st.info("💡 **Insight:** This shows where highs and lows typically form during the day. Higher bars indicate more frequent formation in that time bucket.")
+        else:
+            st.warning("⚠️ No data available for 16:00 observation time with current filters.")
         
         st.markdown("---")
         # Data table
